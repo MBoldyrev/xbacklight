@@ -32,11 +32,15 @@
 #include <xcb/xproto.h>
 #include <xcb/randr.h>
 
+#include <assert.h>
 #include <ctype.h>
+#include <math.h>
 #include <string.h>
 #include <unistd.h>
 
 typedef enum { Get, Set, Inc, Dec } op_t;
+
+static const double kExp = 3;
 
 static char *program_name;
 
@@ -113,6 +117,16 @@ backlight_set (xcb_connection_t *conn, xcb_randr_output_t output, long value)
     xcb_randr_change_output_property (conn, output, backlight, XCB_ATOM_INTEGER,
 				      32, XCB_PROP_MODE_REPLACE,
 				      1, (unsigned char *)&value);
+}
+
+static double from_exp_scale(double val, double min, double max) {
+    assert(val >= min && val <= max);
+    return pow((val - min) / (max - min), 1 / kExp);
+}
+
+static double to_exp_scale(double val, double min, double max) {
+    assert(val >= 0 && val <= 1);
+    return pow(val, kExp) * (max - min) + min;
 }
 
 int
@@ -282,7 +296,6 @@ main (int argc, char **argv)
 	    xcb_randr_output_t output = outputs[o];
 	    double    	cur, new, step;
 	    double	min, max;
-	    double	set;
 
 	    cur = backlight_get (conn, output);
 	    if (cur != -1)
@@ -298,36 +311,49 @@ main (int argc, char **argv)
 		if (prop_reply->range &&
 		    xcb_randr_query_output_property_valid_values_length (prop_reply) == 2) {
 		    int32_t *values = xcb_randr_query_output_property_valid_values (prop_reply);
+		    double cur_log;
 		    min = values[0];
 		    max = values[1];
+		    cur_log = from_exp_scale(cur, min, max);
 
 		    if (op == Get) {
-			printf ("%f\n", (cur - min) * 100 / (max - min));
+			printf ("%f\n", cur_log);
 		    } else {
-			set = value * (max - min) / 100;
+		    double new_log;
+		    assert(value >= 0 && value <= 100);
 			switch (op) {
 			case Set:
-			    new = min + set;
+			    new_log = value / 100.d;
 			    break;
 			case Inc:
-			    new = cur + set;
+			    new_log = cur_log + value / 100.d;
 			    break;
 			case Dec:
-			    new = cur - set;
+			    new_log = cur_log - value / 100.d;
 			    break;
 			default:
 			    xcb_aux_sync (conn);
 			    return 1;
 			}
+			if (new_log > 1.d) {
+			    new_log = 1.d;
+			    new = max;
+			}
+			if (new_log < 0.d) {
+			    new_log = 0.d;
+			    new = min;
+			}
+			new = to_exp_scale(new_log, min, max);
 			if (new > max) new = max;
 			if (new < min) new = min;
-			step = (new - cur) / steps;
+			step = (new_log - cur_log) / steps;
 			for (i = 0; i < steps && step != 0; i++)
 			{
+			    cur_log += step;
 			    if (i == steps - 1)
 				cur = new;
 			    else
-				cur += step;
+				cur = to_exp_scale(cur_log, min, max);
 			    backlight_set (conn, output, (long) cur);
 			    xcb_flush (conn);
 			    usleep (total_time * 1000 / steps);
